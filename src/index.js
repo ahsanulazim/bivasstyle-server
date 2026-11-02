@@ -12,10 +12,10 @@ import productRouter from "../router/product.route.js";
 import locationRouter from "../router/location.route.js";
 import shippingRatesRouter from "../router/shipping.route.js";
 import orderRouter from "../router/order.route.js";
-import zinpayRouter from "../router/zinpay.route.js";
 import categoryRouter from "../router/category.route.js";
 import couponRouter from "../router/coupon.route.js";
 import reviewRouter from "../router/review.route.js";
+import analyticsRouter from "../router/analytics.route.js";
 
 dotenv.config();
 
@@ -51,10 +51,10 @@ app.use("/api/v1/products", productRouter);
 app.use("/api/v1/locations", locationRouter);
 app.use("/api/v1/shippingRates", shippingRatesRouter);
 app.use("/api/v1/orders", orderRouter);
-app.use("/api/v1/zinpay", zinpayRouter);
 app.use("/api/v1/category", categoryRouter);
 app.use("/api/v1/coupons", couponRouter);
 app.use("/api/v1/reviews", reviewRouter);
+app.use("/api/v1/analytics", analyticsRouter);
 
 const startServer = async () => {
   try {

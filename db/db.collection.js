@@ -1,6 +1,6 @@
 import client from "../lib/db.js";
 
-const DB_NAME = process.env.DB_NAME || "oiki_store";
+const DB_NAME = process.env.DB_NAME || "bivasstyle";
 const db = client.db(DB_NAME);
 
 export const orderCollection = db.collection("orders");

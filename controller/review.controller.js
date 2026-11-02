@@ -144,3 +144,66 @@ export const deleteReview = async (req, res) => {
   }
 };
 
+export const getAllReviewsAdmin = async (req, res) => {
+  try {
+    const { rating, search, status } = req.query;
+    const filter = {};
+
+    if (rating && Number(rating) > 0) {
+      filter.rating = Number(rating);
+    }
+
+    if (search && search.trim()) {
+      const regex = { $regex: search.trim(), $options: "i" };
+      filter.$or = [
+        { userName: regex },
+        { userEmail: regex },
+        { comment: regex },
+        { productSlug: regex },
+      ];
+    }
+
+    if (status) {
+      filter.status = status;
+    }
+
+    const reviews = await reviewCollection
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return res.status(200).json({ success: true, reviews });
+  } catch (error) {
+    console.error("Error fetching all reviews for admin:", error);
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch reviews" });
+  }
+};
+
+export const toggleReviewApproval = async (req, res) => {
+  try {
+    const { id } = req.query;
+    if (!id || !ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: "Valid review ID is required" });
+    }
+
+    const review = await reviewCollection.findOne({ _id: new ObjectId(id) });
+    if (!review) {
+      return res.status(404).json({ success: false, message: "Review not found" });
+    }
+
+    const newStatus = review.status === "hidden" ? "approved" : "hidden";
+    await reviewCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { status: newStatus, updatedAt: new Date() } },
+    );
+
+    emitRealtimeEvent("review:updated", { action: "status_toggled", reviewId: id, status: newStatus });
+    return res.status(200).json({ success: true, message: `Review ${newStatus}`, status: newStatus });
+  } catch (error) {
+    console.error("Error toggling review approval:", error);
+    return res.status(500).json({ success: false, message: "Failed to toggle review status" });
+  }
+};
+

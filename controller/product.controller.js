@@ -10,10 +10,16 @@ export const createProduct = async (req, res) => {
     stock,
     productDescription,
     price,
+    costPrice,
     discount,
     category,
     productImages,
     sku,
+    barcode,
+    status = "published",
+    weight = 0,
+    lowStockThreshold = 5,
+    featured = false,
     variantDetails,
   } = req.body;
 
@@ -67,13 +73,19 @@ export const createProduct = async (req, res) => {
   const product = {
     productName,
     slug,
-    stock,
+    stock: Number(stock || 0),
     category,
     productDescription,
-    price,
-    discount,
+    price: Number(price || 0),
+    costPrice: costPrice !== undefined && costPrice !== "" ? Number(costPrice) : 0,
+    discount: discount !== undefined && discount !== "" ? Number(discount) : 0,
     productImages: uploadedImageUrls,
-    sku,
+    sku: sku || "",
+    barcode: barcode || "",
+    status: status || "published",
+    weight: Number(weight || 0),
+    lowStockThreshold: Number(lowStockThreshold || 5),
+    featured: Boolean(featured),
     variantDetails,
     createdAt,
     updatedAt,
@@ -98,10 +110,16 @@ export const updateProduct = async (req, res) => {
     stock,
     productDescription,
     price,
+    costPrice,
     discount,
     category,
     productImages,
     sku,
+    barcode,
+    status,
+    weight,
+    lowStockThreshold,
+    featured,
     variantDetails,
   } = req.body;
 
@@ -170,14 +188,33 @@ export const updateProduct = async (req, res) => {
     const updatedDoc = {
       productName: productName ?? existingProduct.productName,
       slug: slug ?? existingProduct.slug,
-      stock: stock ?? existingProduct.stock,
+      stock: stock !== undefined ? Number(stock) : existingProduct.stock,
       category: category ?? existingProduct.category,
       productDescription:
         productDescription ?? existingProduct.productDescription,
-      price: price ?? existingProduct.price,
-      discount: discount ?? existingProduct.discount,
+      price: price !== undefined ? Number(price) : existingProduct.price,
+      costPrice:
+        costPrice !== undefined
+          ? Number(costPrice)
+          : existingProduct.costPrice || 0,
+      discount:
+        discount !== undefined
+          ? Number(discount)
+          : existingProduct.discount || 0,
       productImages: uploadedImageUrls,
       sku: sku ?? existingProduct.sku,
+      barcode: barcode ?? existingProduct.barcode ?? "",
+      status: status ?? existingProduct.status ?? "published",
+      weight:
+        weight !== undefined ? Number(weight) : existingProduct.weight || 0,
+      lowStockThreshold:
+        lowStockThreshold !== undefined
+          ? Number(lowStockThreshold)
+          : existingProduct.lowStockThreshold || 5,
+      featured:
+        featured !== undefined
+          ? Boolean(featured)
+          : existingProduct.featured || false,
       variantDetails: processedVariants,
       updatedAt: new Date(),
     };
@@ -393,6 +430,142 @@ export const deleteProduct = async (req, res) => {
     res
       .status(500)
       .json({ success: false, message: "Failed to delete Product" });
+  }
+};
+
+export const toggleProductFeatured = async (req, res) => {
+  const { id } = req.query;
+  if (!id || !ObjectId.isValid(id)) {
+    return res.status(400).json({ success: false, message: "Valid product ID is required" });
+  }
+
+  try {
+    const product = await productCollection.findOne({ _id: new ObjectId(id) });
+    if (!product) {
+      return res.status(404).json({ success: false, message: "Product not found" });
+    }
+
+    const newFeatured = !product.featured;
+    await productCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { featured: newFeatured, updatedAt: new Date() } },
+    );
+
+    emitRealtimeEvent("product:updated", {
+      action: "featured_toggled",
+      productId: id,
+      featured: newFeatured,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: newFeatured ? "Product featured" : "Product unfeatured",
+      featured: newFeatured,
+    });
+  } catch (error) {
+    console.error("Error toggling featured:", error);
+    return res.status(500).json({ success: false, message: "Failed to toggle featured status" });
+  }
+};
+
+export const quickUpdateProductStock = async (req, res) => {
+  const { id } = req.query;
+  const { stock, color, size } = req.body;
+
+  if (!id || !ObjectId.isValid(id)) {
+    return res.status(400).json({ success: false, message: "Valid product ID is required" });
+  }
+
+  if (stock === undefined || isNaN(stock)) {
+    return res.status(400).json({ success: false, message: "Stock number is required" });
+  }
+
+  try {
+    const product = await productCollection.findOne({ _id: new ObjectId(id) });
+    if (!product) {
+      return res.status(404).json({ success: false, message: "Product not found" });
+    }
+
+    // If specific variant & size is specified
+    if (color && size && Array.isArray(product.variantDetails)) {
+      const updatedVariants = product.variantDetails.map((v) => {
+        if (v.color === color) {
+          return {
+            ...v,
+            sizes: (v.sizes || []).map((s) =>
+              s.size === size ? { ...s, stock: Number(stock) } : s,
+            ),
+          };
+        }
+        return v;
+      });
+
+      await productCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { variantDetails: updatedVariants, updatedAt: new Date() } },
+      );
+    } else {
+      // General product stock update
+      await productCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { stock: Number(stock), updatedAt: new Date() } },
+      );
+    }
+
+    emitRealtimeEvent("product:updated", { action: "stock_updated", productId: id, stock });
+    return res.status(200).json({ success: true, message: "Stock updated successfully" });
+  } catch (error) {
+    console.error("Error updating stock:", error);
+    return res.status(500).json({ success: false, message: "Failed to update stock" });
+  }
+};
+
+export const bulkUpdateProducts = async (req, res) => {
+  const { action, ids, payload = {} } = req.body;
+
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ success: false, message: "Product IDs array required" });
+  }
+
+  try {
+    const validIds = ids.filter((id) => ObjectId.isValid(id)).map((id) => new ObjectId(id));
+
+    if (action === "status") {
+      const { status } = payload;
+      if (!["published", "draft", "archived"].includes(status)) {
+        return res.status(400).json({ success: false, message: "Valid status (published, draft, archived) required" });
+      }
+      await productCollection.updateMany(
+        { _id: { $in: validIds } },
+        { $set: { status, updatedAt: new Date() } },
+      );
+      emitRealtimeEvent("product:updated", { action: "bulk_status", count: validIds.length, status });
+      return res.status(200).json({ success: true, message: `Updated status for ${validIds.length} products to ${status}` });
+    }
+
+    if (action === "delete") {
+      await productCollection.deleteMany({ _id: { $in: validIds } });
+      emitRealtimeEvent("product:updated", { action: "bulk_delete", count: validIds.length });
+      return res.status(200).json({ success: true, message: `Deleted ${validIds.length} products successfully` });
+    }
+
+    if (action === "category") {
+      const { category } = payload;
+      if (!category) {
+        return res.status(400).json({ success: false, message: "Category is required" });
+      }
+      await productCollection.updateMany(
+        { _id: { $in: validIds } },
+        { $set: { category, updatedAt: new Date() } },
+      );
+      emitRealtimeEvent("product:updated", { action: "bulk_category", count: validIds.length, category });
+      return res.status(200).json({ success: true, message: `Assigned ${validIds.length} products to category ${category}` });
+    }
+
+    return res.status(400).json({ success: false, message: "Invalid bulk action" });
+  } catch (error) {
+    console.error("Bulk update products error:", error);
+    return res.status(500).json({ success: false, message: "Failed to perform bulk action" });
   }
 };
 

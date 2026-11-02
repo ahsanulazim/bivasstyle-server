@@ -8,13 +8,19 @@ export const createCategory = async (req, res) => {
   const createdAt = new Date();
   const updatedAt = new Date();
 
-  let coverThumbnail;
+  let coverThumbnail = "";
 
-  if (thumbnail) {
-    const uploadThumbnail = await cloudinary.uploader.upload(thumbnail, {
-      folder: "category",
-    });
-    coverThumbnail = uploadThumbnail?.secure_url || "";
+  if (thumbnail && typeof thumbnail === "string" && thumbnail.startsWith("data:image")) {
+    try {
+      const uploadThumbnail = await cloudinary.uploader.upload(thumbnail, {
+        folder: "category",
+      });
+      coverThumbnail = uploadThumbnail?.secure_url || "";
+    } catch (uploadError) {
+      console.error("Cloudinary upload error:", uploadError);
+    }
+  } else if (thumbnail && typeof thumbnail === "string") {
+    coverThumbnail = thumbnail;
   }
 
   const category = {
@@ -33,7 +39,60 @@ export const createCategory = async (req, res) => {
   } catch (error) {
     res
       .status(500)
-      .json({ success: false, message: "Ctegory creation Failed" });
+      .json({ success: false, message: "Category creation Failed" });
+  }
+};
+
+export const updateCategory = async (req, res) => {
+  const { id } = req.query;
+  const { name, slug, thumbnail } = req.body;
+
+  if (!id || !ObjectId.isValid(id)) {
+    return res.status(400).json({ success: false, message: "Valid category ID is required" });
+  }
+
+  try {
+    const category = await categoryCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!category) {
+      return res.status(404).json({ success: false, message: "Category not found" });
+    }
+
+    const updateDoc = {
+      name: name || category.name,
+      slug: slug || category.slug,
+      updatedAt: new Date(),
+    };
+
+    if (thumbnail && thumbnail !== category.coverThumbnail) {
+      if (typeof thumbnail === "string" && thumbnail.startsWith("data:image")) {
+        try {
+          const uploadThumbnail = await cloudinary.uploader.upload(thumbnail, {
+            folder: "category",
+          });
+          updateDoc.coverThumbnail = uploadThumbnail?.secure_url || "";
+        } catch (uploadErr) {
+          console.error("Cloudinary upload error:", uploadErr);
+        }
+      } else {
+        updateDoc.coverThumbnail = thumbnail;
+      }
+    }
+
+    await categoryCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updateDoc }
+    );
+
+    emitRealtimeEvent("category:updated", { action: "updated", slug: updateDoc.slug, categoryId: id });
+    emitRealtimeEvent("dashboard:update", { type: "category", action: "updated" });
+
+    res.status(200).json({ success: true, message: "Category updated successfully" });
+  } catch (error) {
+    console.error("Error updating category:", error);
+    res.status(500).json({ success: false, message: "Failed to update category" });
   }
 };
 

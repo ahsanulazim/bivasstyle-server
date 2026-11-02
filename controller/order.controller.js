@@ -1,6 +1,5 @@
 import { ObjectId } from "mongodb";
 import dotenv from "dotenv";
-import { ziniPayCreatePayment } from "./zinpay.controller.js";
 import { createSteadfastOrder } from "../services/steadfast.js";
 import { emitRealtimeEvent } from "../lib/socket.js";
 import { evaluateCoupon } from "./coupon.controller.js";
@@ -211,108 +210,37 @@ export const createOrder = async (req, res) => {
       }
     };
 
-    // 4. Order creation for COD
-    if (paymentMethod === "cod") {
-      // Deduct stock for COD
-      await deductOrderStock(orderProducts);
-      await recordCouponUsage();
+    // 4. Order creation for COD (Cash on Delivery)
+    await deductOrderStock(orderProducts);
+    await recordCouponUsage();
 
-      const order = {
-        user: user._id ? user._id : user,
-        customer,
-        products: orderProducts,
-        shippingCharge,
-        subtotal,
-        couponCode: appliedCouponCode,
-        discountAmount,
-        totalPrice,
-        status: "pending",
-        paymentStatus: "unpaid",
-        paymentMethod: "cod",
-        stockDeducted: true,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      };
-      const result = await orderCollection.insertOne(order);
-      const createdOrder = { ...order, _id: result.insertedId };
+    const order = {
+      user: user._id ? user._id : user,
+      customer,
+      products: orderProducts,
+      shippingCharge,
+      subtotal,
+      couponCode: appliedCouponCode,
+      discountAmount,
+      totalPrice,
+      status: "pending",
+      paymentStatus: "unpaid",
+      paymentMethod: "cod",
+      stockDeducted: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const result = await orderCollection.insertOne(order);
+    const createdOrder = { ...order, _id: result.insertedId };
 
-      emitRealtimeEvent("order:created", { orderId: result.insertedId });
-      emitRealtimeEvent("dashboard:update", { type: "order", action: "created" });
+    emitRealtimeEvent("order:created", { orderId: result.insertedId });
+    emitRealtimeEvent("dashboard:update", { type: "order", action: "created" });
 
-      return res.status(201).json({
-        success: true,
-        message: "Order created successfully",
-        order: createdOrder,
-      });
-    }
-
-    // 5. Order creation for Online Payment
-    if (paymentMethod === "online") {
-      await recordCouponUsage();
-      const pendingOrderId = new ObjectId();
-      const order = {
-        _id: pendingOrderId,
-        user: user._id ? user._id : user,
-        customer,
-        products: orderProducts,
-        shippingCharge,
-        subtotal,
-        couponCode: appliedCouponCode,
-        discountAmount,
-        totalPrice,
-        status: "pending_payment",
-        paymentStatus: "unpaid",
-        paymentMethod: "online",
-        stockDeducted: false,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      };
-      await orderCollection.insertOne(order);
-      emitRealtimeEvent("order:created", { orderId: pendingOrderId });
-      emitRealtimeEvent("dashboard:update", { type: "order", action: "created" });
-
-      try {
-        const payload = {
-          cus_name: `${customer.firstName} ${customer.lastName}`,
-          cus_email: customer.email || "",
-          amount: totalPrice,
-          metadata: {
-            order_id: pendingOrderId.toString(),
-            user_id: user._id ? user._id : user,
-          },
-          redirect_url: `${process.env.FRONTEND_URL}/cart/checkout/payment-success?orderId=${pendingOrderId.toString()}&method=online`,
-          cancel_url: `${process.env.FRONTEND_URL}/cart/checkout/payment-cancelled?orderId=${pendingOrderId.toString()}`,
-          val_id: "INV-" + Date.now(),
-          webhook_url: `${process.env.SERVER_URL}/zinpay/payment-webhook`,
-        };
-
-        const data = await ziniPayCreatePayment(
-          payload,
-          process.env.ZINIPAY_API_KEY,
-        );
-
-        if (data?.payment_url) {
-          return res.json({
-            success: true,
-            orderId: pendingOrderId.toString(),
-            paymentUrl: data.payment_url,
-          });
-        } else {
-          return res.status(400).json({
-            success: false,
-            message: "Payment URL not found",
-            error: data,
-          });
-        }
-      } catch (err) {
-        console.error("Payment create error:", err.message);
-        return res
-          .status(500)
-          .json({ success: false, message: "Payment session creation failed" });
-      }
-    }
-
-    return res.status(400).json({ success: false, message: "Invalid payment method" });
+    return res.status(201).json({
+      success: true,
+      message: "Order created successfully",
+      order: createdOrder,
+    });
   } catch (error) {
     console.error("Error creating order:", error);
     res.status(500).json({ success: false, message: "Internal server error" });

@@ -1,5 +1,6 @@
 import express from "express";
 import {
+  bulkUpdateProducts,
   createProduct,
   deleteProduct,
   getAllProducts,
@@ -7,7 +8,9 @@ import {
   getNewArriavals,
   getProductBySlug,
   getProductsByFilters,
+  quickUpdateProductStock,
   searchProducts,
+  toggleProductFeatured,
   updateProduct,
 } from "../controller/product.controller.js";
 import { verifyAdmin, verifyToken } from "../middleware/auth.middleware.js";
@@ -16,6 +19,9 @@ const router = express.Router();
 
 router.post("/createProduct", verifyToken, verifyAdmin, createProduct);
 router.put("/updateProduct", verifyToken, verifyAdmin, updateProduct);
+router.patch("/toggleFeatured", verifyToken, verifyAdmin, toggleProductFeatured);
+router.patch("/quickStock", verifyToken, verifyAdmin, quickUpdateProductStock);
+router.post("/bulkUpdate", verifyToken, verifyAdmin, bulkUpdateProducts);
 router.get("/getAllProducts", getAllProducts);
 router.get("/getProductBySlug", getProductBySlug);
 router.get("/getProductsByFilters", getProductsByFilters);
