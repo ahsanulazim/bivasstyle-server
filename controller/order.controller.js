@@ -188,23 +188,7 @@ export const createOrder = async (req, res) => {
   }
 
   try {
-    // 1. Calculate shipping charge
-    const insideDhaka = await shippingRateCollection.findOne({
-      "location.value": customer.district,
-    });
-    const outsideDhaka = await shippingRateCollection.findOne({
-      "location.value": "all",
-    });
-
-    let shippingCharge = 0;
-    if (insideDhaka) {
-      shippingCharge = insideDhaka.baseCharge + (insideDhaka.extraCharge ?? 0);
-    } else if (outsideDhaka) {
-      shippingCharge =
-        outsideDhaka.baseCharge + (outsideDhaka.extraCharge ?? 0);
-    }
-
-    // 2. Validate stock & prepare order products list
+    // 1. Validate stock & prepare order products list
     const orderProducts = [];
     for (const product of products) {
       const productData = await productCollection.findOne({
@@ -300,12 +284,51 @@ export const createOrder = async (req, res) => {
         size: product.size || null,
         quantity: product.quantity,
         price: unitPrice,
+        weight: Number(productData.weight || 0),
         image:
           matchedVariant?.swatchImage ||
           matchedVariant?.imageGallery?.[0] ||
           productData.productImages?.[0] ||
           null,
       });
+    }
+
+    // 2. Weight calculation & Active shipping rate lookup
+    const totalWeight = orderProducts.reduce(
+      (sum, p) => sum + (Number(p.weight || 0) * Number(p.quantity || 1)),
+      0,
+    );
+
+    const districtQueries = [customer.district];
+    if (customer.district && !isNaN(customer.district)) {
+      districtQueries.push(Number(customer.district));
+    }
+
+    let activeRate = await shippingRateCollection.findOne({
+      status: true,
+      "location.value": { $in: districtQueries },
+    });
+
+    if (!activeRate) {
+      activeRate = await shippingRateCollection.findOne({
+        status: true,
+        "location.value": "all",
+      });
+    }
+
+    let shippingCharge = 0;
+    if (activeRate) {
+      const baseCharge = Number(activeRate.baseCharge || 0);
+      const weightLimit = Number(activeRate.weightLimit || 0);
+      const extraCharge = Number(activeRate.extraCharge || 0);
+
+      if (weightLimit > 0 && totalWeight > weightLimit && extraCharge > 0) {
+        const extraWeight = totalWeight - weightLimit;
+        const extraUnits = Math.ceil(extraWeight);
+        shippingCharge = baseCharge + (extraUnits * extraCharge);
+      } else {
+        shippingCharge = baseCharge;
+      }
     }
 
     // 3. Total calculation & Coupon validation
@@ -367,7 +390,10 @@ export const createOrder = async (req, res) => {
       user: user._id ? user._id : user,
       customer,
       products: orderProducts,
+      totalWeight,
       shippingCharge,
+      shippingRateId: activeRate?._id || null,
+      courierCompany: activeRate?.companyName || null,
       subtotal,
       couponCode: appliedCouponCode,
       discountAmount,
