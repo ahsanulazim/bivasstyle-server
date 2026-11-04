@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import dotenv from "dotenv";
 import { createSteadfastOrder } from "../services/steadfast.js";
+import { sendFacebookCapiEvent } from "../services/facebookCapi.js";
 import { emitRealtimeEvent } from "../lib/socket.js";
 import { evaluateCoupon } from "./coupon.controller.js";
 import {
@@ -19,26 +20,78 @@ export const deductOrderStock = async (products) => {
     const productData = await productCollection.findOne({
       _id: new ObjectId(product.productId),
     });
-    if (!productData || !productData.variantDetails) continue;
+    if (!productData) continue;
 
-    const variantData = productData.variantDetails.map((variant) => {
-      if (variant.color === product.color) {
-        return {
-          ...variant,
-          sizes: variant.sizes.map((size) =>
-            size.size === product.size
-              ? { ...size, stock: Math.max(0, size.stock - product.quantity) }
-              : size,
-          ),
-        };
-      }
-      return variant;
-    });
+    if (
+      Array.isArray(productData.variantDetails) &&
+      productData.variantDetails.length > 0 &&
+      product.color
+    ) {
+      const variantData = productData.variantDetails.map((variant) => {
+        if (variant.color?.toLowerCase() === product.color?.toLowerCase()) {
+          if (
+            product.size &&
+            Array.isArray(variant.sizes) &&
+            variant.sizes.length > 0
+          ) {
+            return {
+              ...variant,
+              sizes: variant.sizes.map((size) =>
+                size.size === product.size
+                  ? {
+                      ...size,
+                      stock: Math.max(
+                        0,
+                        Number(size.stock || 0) - product.quantity,
+                      ),
+                    }
+                  : size,
+              ),
+            };
+          } else {
+            // Color-only variant
+            return {
+              ...variant,
+              stock: Math.max(
+                0,
+                Number(variant.stock || 0) - product.quantity,
+              ),
+            };
+          }
+        }
+        return variant;
+      });
 
-    await productCollection.updateOne(
-      { _id: new ObjectId(product.productId) },
-      { $set: { variantDetails: variantData } },
-    );
+      const totalVariantStock = variantData.reduce((total, variant) => {
+        if (Array.isArray(variant.sizes) && variant.sizes.length > 0) {
+          const variantStock = variant.sizes.reduce(
+            (sum, s) => sum + Number(s.stock || 0),
+            0,
+          );
+          return total + variantStock;
+        }
+        return total + Number(variant.stock || 0);
+      }, 0);
+
+      await productCollection.updateOne(
+        { _id: new ObjectId(product.productId) },
+        {
+          $set: {
+            variantDetails: variantData,
+            stock: totalVariantStock,
+            updatedAt: new Date(),
+          },
+        },
+      );
+    } else {
+      // Simple product stock deduction
+      const currentStock = Number(productData.stock || 0);
+      const newStock = Math.max(0, currentStock - product.quantity);
+      await productCollection.updateOne(
+        { _id: new ObjectId(product.productId) },
+        { $set: { stock: newStock, updatedAt: new Date() } },
+      );
+    }
   }
   emitRealtimeEvent("product:updated", { action: "stock_deducted" });
 };
@@ -49,26 +102,72 @@ export const restoreOrderStock = async (products) => {
     const productData = await productCollection.findOne({
       _id: new ObjectId(product.productId),
     });
-    if (!productData || !productData.variantDetails) continue;
+    if (!productData) continue;
 
-    const variantData = productData.variantDetails.map((variant) => {
-      if (variant.color === product.color) {
-        return {
-          ...variant,
-          sizes: variant.sizes.map((size) =>
-            size.size === product.size
-              ? { ...size, stock: size.stock + product.quantity }
-              : size,
-          ),
-        };
-      }
-      return variant;
-    });
+    if (
+      Array.isArray(productData.variantDetails) &&
+      productData.variantDetails.length > 0 &&
+      product.color
+    ) {
+      const variantData = productData.variantDetails.map((variant) => {
+        if (variant.color?.toLowerCase() === product.color?.toLowerCase()) {
+          if (
+            product.size &&
+            Array.isArray(variant.sizes) &&
+            variant.sizes.length > 0
+          ) {
+            return {
+              ...variant,
+              sizes: variant.sizes.map((size) =>
+                size.size === product.size
+                  ? {
+                      ...size,
+                      stock: Number(size.stock || 0) + product.quantity,
+                    }
+                  : size,
+              ),
+            };
+          } else {
+            // Color-only variant
+            return {
+              ...variant,
+              stock: Number(variant.stock || 0) + product.quantity,
+            };
+          }
+        }
+        return variant;
+      });
 
-    await productCollection.updateOne(
-      { _id: new ObjectId(product.productId) },
-      { $set: { variantDetails: variantData } },
-    );
+      const totalVariantStock = variantData.reduce((total, variant) => {
+        if (Array.isArray(variant.sizes) && variant.sizes.length > 0) {
+          const variantStock = variant.sizes.reduce(
+            (sum, s) => sum + Number(s.stock || 0),
+            0,
+          );
+          return total + variantStock;
+        }
+        return total + Number(variant.stock || 0);
+      }, 0);
+
+      await productCollection.updateOne(
+        { _id: new ObjectId(product.productId) },
+        {
+          $set: {
+            variantDetails: variantData,
+            stock: totalVariantStock,
+            updatedAt: new Date(),
+          },
+        },
+      );
+    } else {
+      // Simple product stock restoration
+      const currentStock = Number(productData.stock || 0);
+      const newStock = currentStock + product.quantity;
+      await productCollection.updateOne(
+        { _id: new ObjectId(product.productId) },
+        { $set: { stock: newStock, updatedAt: new Date() } },
+      );
+    }
   }
   emitRealtimeEvent("product:updated", { action: "stock_restored" });
 };
@@ -118,44 +217,94 @@ export const createOrder = async (req, res) => {
           .json({ success: false, message: `Product not found: ${product.productName || product.productId}` });
       }
 
-      const matchedVariant = productData.variantDetails?.find(
-        (v) => v.color === product.color,
-      );
-      const matchedSize = matchedVariant?.sizes?.find(
-        (s) => s.size === product.size,
+      const hasProductVariants = Boolean(
+        productData.hasVariants !== false &&
+          Array.isArray(productData.variantDetails) &&
+          productData.variantDetails.length > 0,
       );
 
-      if (!matchedSize) {
-        return res.status(400).json({
-          success: false,
-          message: `Size ${product.size} for ${productData.productName} (${product.color}) not found`,
-        });
+      let matchedVariant = null;
+      let matchedSize = null;
+      let availableStock = Number(productData.stock || 0);
+      let unitPrice =
+        Number(productData.discount) > 0
+          ? Number(productData.discount)
+          : Number(productData.price || 0);
+
+      if (hasProductVariants) {
+        matchedVariant = productData.variantDetails?.find(
+          (v) => v.color?.toLowerCase() === product.color?.toLowerCase(),
+        );
+
+        if (!matchedVariant) {
+          return res.status(400).json({
+            success: false,
+            message: `Color ${product.color} for ${productData.productName} not found`,
+          });
+        }
+
+        const hasVariantSizes =
+          Array.isArray(matchedVariant.sizes) &&
+          matchedVariant.sizes.length > 0;
+
+        if (hasVariantSizes) {
+          matchedSize = matchedVariant.sizes.find(
+            (s) => s.size?.toLowerCase() === product.size?.toLowerCase(),
+          );
+          if (!matchedSize) {
+            return res.status(400).json({
+              success: false,
+              message: `Size ${product.size} for ${productData.productName} (${product.color}) not found`,
+            });
+          }
+          availableStock = Number(matchedSize.stock || 0);
+          unitPrice =
+            Number(matchedSize.discount) > 0
+              ? Number(matchedSize.discount)
+              : Number(matchedSize.price) > 0
+                ? Number(matchedSize.price)
+                : Number(productData.discount) > 0
+                  ? Number(productData.discount)
+                  : Number(productData.price);
+        } else {
+          // Color-only variant
+          availableStock = Number(
+            matchedVariant.stock ?? productData.stock ?? 0,
+          );
+          unitPrice =
+            Number(matchedVariant.discount) > 0
+              ? Number(matchedVariant.discount)
+              : Number(matchedVariant.price) > 0
+                ? Number(matchedVariant.price)
+                : Number(productData.discount) > 0
+                  ? Number(productData.discount)
+                  : Number(productData.price);
+        }
       }
 
-      if (matchedSize.stock < product.quantity) {
+      if (availableStock < product.quantity) {
         return res.status(400).json({
           success: false,
-          message: `${productData.productName} (${product.color} - ${product.size}) is out of stock (Available: ${matchedSize.stock})`,
+          message: `${productData.productName} ${
+            product.color
+              ? `(${product.color}${product.size ? ` - ${product.size}` : ""})`
+              : ""
+          } is out of stock (Available: ${availableStock})`,
         });
       }
-
-      const unitPrice =
-        Number(matchedSize?.discount) > 0
-          ? Number(matchedSize.discount)
-          : Number(matchedSize?.price) > 0
-            ? Number(matchedSize.price)
-            : Number(productData.discount) > 0
-              ? Number(productData.discount)
-              : Number(productData.price);
 
       orderProducts.push({
         productId: productData._id,
         productName: productData.productName,
-        color: product.color,
-        size: product.size,
+        color: product.color || null,
+        size: product.size || null,
         quantity: product.quantity,
         price: unitPrice,
-        image: matchedVariant?.swatchImage || matchedVariant?.imageGallery?.[0] || productData.productImages?.[0] || null,
+        image:
+          matchedVariant?.swatchImage ||
+          matchedVariant?.imageGallery?.[0] ||
+          productData.productImages?.[0] ||
+          null,
       });
     }
 
@@ -235,6 +384,37 @@ export const createOrder = async (req, res) => {
 
     emitRealtimeEvent("order:created", { orderId: result.insertedId });
     emitRealtimeEvent("dashboard:update", { type: "order", action: "created" });
+
+    // Asynchronously dispatch Facebook Conversions API (CAPI) Purchase event
+    sendFacebookCapiEvent({
+      eventName: "Purchase",
+      eventId: result.insertedId.toString(),
+      eventSourceUrl:
+        req.body?.eventSourceUrl ||
+        `${process.env.FRONTEND_URL || "https://bivasstyle.com"}/cart/checkout`,
+      customer,
+      user,
+      req,
+      fbp: req.body?.fbp,
+      fbc: req.body?.fbc,
+      customData: {
+        currency: "BDT",
+        value: Number(totalPrice || 0),
+        order_id: result.insertedId.toString(),
+        content_type: "product",
+        contents: orderProducts.map((p) => ({
+          id: p.productId?.toString(),
+          quantity: p.quantity,
+          item_price: p.price,
+        })),
+        num_items: orderProducts.reduce((sum, p) => sum + p.quantity, 0),
+      },
+    }).catch((capiErr) => {
+      console.error(
+        "[Facebook CAPI] Purchase error on order placement:",
+        capiErr,
+      );
+    });
 
     return res.status(201).json({
       success: true,

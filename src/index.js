@@ -2,6 +2,7 @@ import http from "http";
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import cookieParser from "cookie-parser";
 import { initSocket } from "../lib/socket.js";
 import { connectToMongoDB, disconnectFromMongoDB } from "../lib/db.js";
 import { initIndexes } from "../db/db.collection.js";
@@ -35,6 +36,7 @@ app.use(
     credentials: true,
   }),
 );
+app.use(cookieParser());
 app.use(express.json({ limit: "10mb" }));
 
 const PORT = process.env.PORT || 5000;

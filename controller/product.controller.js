@@ -3,6 +3,43 @@ import cloudinary from "../lib/cloudinary.js";
 import { productCollection } from "../db/db.collection.js";
 import { emitRealtimeEvent } from "../lib/socket.js";
 
+export const uploadProductImages = async (req, res) => {
+  try {
+    const files = req.files || (req.file ? [req.file] : []);
+    if (!files || files.length === 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "No image file provided" });
+    }
+
+    const uploadPromises = files.map(
+      (file) =>
+        new Promise((resolve, reject) => {
+          const uploadStream = cloudinary.uploader.upload_stream(
+            { folder: "products" },
+            (error, result) => {
+              if (error) reject(error);
+              else resolve(result.secure_url);
+            },
+          );
+          uploadStream.end(file.buffer);
+        }),
+    );
+
+    const urls = await Promise.all(uploadPromises);
+    return res.status(200).json({
+      success: true,
+      urls,
+      url: urls[0],
+    });
+  } catch (error) {
+    console.error("Cloudinary upload error:", error);
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to upload image(s)" });
+  }
+};
+
 export const createProduct = async (req, res) => {
   const {
     productName,
@@ -20,11 +57,21 @@ export const createProduct = async (req, res) => {
     weight = 0,
     lowStockThreshold = 5,
     featured = false,
+    hasVariants,
     variantDetails,
   } = req.body;
 
   if (!productName || !slug || !productDescription || !price) {
-    return res.status(400).json({ message: "Missing required fields" });
+    return res.status(400).json({ success: false, message: "Missing required fields" });
+  }
+
+  const cleanSlug = slug.trim().toLowerCase();
+  const existingProductWithSlug = await productCollection.findOne({ slug: cleanSlug });
+  if (existingProductWithSlug) {
+    return res.status(409).json({
+      success: false,
+      message: `A product with the slug "${cleanSlug}" already exists. Please choose a different slug.`,
+    });
   }
 
   let uploadedImageUrls = [];
@@ -32,6 +79,9 @@ export const createProduct = async (req, res) => {
   if (productImages && Array.isArray(productImages)) {
     uploadedImageUrls = await Promise.all(
       productImages.map(async (image) => {
+        if (typeof image === "string" && image.startsWith("http")) {
+          return image;
+        }
         const uploadRes = await cloudinary.uploader.upload(image, {
           folder: "products",
         });
@@ -40,12 +90,22 @@ export const createProduct = async (req, res) => {
     );
   }
 
-  if (variantDetails && Array.isArray(variantDetails)) {
+  const hasVariantsBool =
+    hasVariants !== undefined
+      ? Boolean(hasVariants)
+      : Boolean(variantDetails && variantDetails.length > 0);
+
+  let processedVariants = hasVariantsBool ? variantDetails || [] : [];
+
+  if (processedVariants && Array.isArray(processedVariants)) {
     await Promise.all(
-      variantDetails.map(async (variant) => {
+      processedVariants.map(async (variant) => {
         if (variant.imageGallery && Array.isArray(variant.imageGallery)) {
           const uploadedGallery = await Promise.all(
             variant.imageGallery.map(async (img) => {
+              if (typeof img === "string" && img.startsWith("http")) {
+                return img;
+              }
               const uploadRes = await cloudinary.uploader.upload(img, {
                 folder: "products",
               });
@@ -54,7 +114,11 @@ export const createProduct = async (req, res) => {
           );
           variant.imageGallery = uploadedGallery;
         }
-        if (variant.swatchImage) {
+        if (
+          variant.swatchImage &&
+          typeof variant.swatchImage === "string" &&
+          !variant.swatchImage.startsWith("http")
+        ) {
           const uploadRes = await cloudinary.uploader.upload(
             variant.swatchImage,
             {
@@ -67,17 +131,33 @@ export const createProduct = async (req, res) => {
     );
   }
 
+  // Calculate stock: if has variants, sum sizes stock or variant stock; otherwise use root stock
+  let computedStock = Number(stock || 0);
+  if (hasVariantsBool && processedVariants.length > 0) {
+    computedStock = processedVariants.reduce((sum, v) => {
+      if (Array.isArray(v.sizes) && v.sizes.length > 0) {
+        const vStock = v.sizes.reduce(
+          (sSum, s) => sSum + Number(s.stock || 0),
+          0,
+        );
+        return sum + vStock;
+      }
+      return sum + Number(v.stock || 0);
+    }, 0);
+  }
+
   const createdAt = new Date();
   const updatedAt = new Date();
 
   const product = {
     productName,
-    slug,
-    stock: Number(stock || 0),
+    slug: cleanSlug,
+    stock: computedStock,
     category,
     productDescription,
     price: Number(price || 0),
-    costPrice: costPrice !== undefined && costPrice !== "" ? Number(costPrice) : 0,
+    costPrice:
+      costPrice !== undefined && costPrice !== "" ? Number(costPrice) : 0,
     discount: discount !== undefined && discount !== "" ? Number(discount) : 0,
     productImages: uploadedImageUrls,
     sku: sku || "",
@@ -86,7 +166,8 @@ export const createProduct = async (req, res) => {
     weight: Number(weight || 0),
     lowStockThreshold: Number(lowStockThreshold || 5),
     featured: Boolean(featured),
-    variantDetails,
+    hasVariants: hasVariantsBool,
+    variantDetails: processedVariants,
     createdAt,
     updatedAt,
   };
@@ -95,10 +176,10 @@ export const createProduct = async (req, res) => {
     await productCollection.insertOne(product);
     emitRealtimeEvent("product:updated", { action: "created", slug: product.slug });
     emitRealtimeEvent("dashboard:update", { type: "product", action: "created" });
-    res.status(201).json({ message: "Product created successfully", product });
+    res.status(201).json({ success: true, message: "Product created successfully", product });
   } catch (error) {
     console.error("Error creating product:", error);
-    res.status(500).json({ message: "Internal server error" });
+    res.status(500).json({ success: false, message: error.message || "Internal server error" });
   }
 };
 
@@ -120,11 +201,12 @@ export const updateProduct = async (req, res) => {
     weight,
     lowStockThreshold,
     featured,
+    hasVariants,
     variantDetails,
   } = req.body;
 
   if (!id) {
-    return res.status(400).json({ message: "Product ID is required" });
+    return res.status(400).json({ success: false, message: "Product ID is required" });
   }
 
   try {
@@ -133,7 +215,24 @@ export const updateProduct = async (req, res) => {
     });
 
     if (!existingProduct) {
-      return res.status(404).json({ message: "Product not found" });
+      return res.status(404).json({ success: false, message: "Product not found" });
+    }
+
+    let cleanSlug = existingProduct.slug;
+    if (slug) {
+      cleanSlug = slug.trim().toLowerCase();
+      if (cleanSlug !== existingProduct.slug) {
+        const existingBySlug = await productCollection.findOne({
+          slug: cleanSlug,
+          _id: { $ne: new ObjectId(id) },
+        });
+        if (existingBySlug) {
+          return res.status(409).json({
+            success: false,
+            message: `A product with slug "${cleanSlug}" already exists. Please choose a different slug.`,
+          });
+        }
+      }
     }
 
     let uploadedImageUrls = existingProduct.productImages || [];
@@ -151,7 +250,19 @@ export const updateProduct = async (req, res) => {
       );
     }
 
-    let processedVariants = variantDetails || existingProduct.variantDetails || [];
+    const hasVariantsBool =
+      hasVariants !== undefined
+        ? Boolean(hasVariants)
+        : variantDetails !== undefined
+          ? Boolean(variantDetails && variantDetails.length > 0)
+          : existingProduct.hasVariants ?? (existingProduct.variantDetails?.length > 0);
+
+    let processedVariants = hasVariantsBool
+      ? variantDetails !== undefined
+        ? variantDetails
+        : existingProduct.variantDetails || []
+      : [];
+
     if (Array.isArray(processedVariants)) {
       await Promise.all(
         processedVariants.map(async (variant) => {
@@ -185,10 +296,25 @@ export const updateProduct = async (req, res) => {
       );
     }
 
+    let computedStock =
+      stock !== undefined ? Number(stock) : existingProduct.stock || 0;
+    if (hasVariantsBool && processedVariants.length > 0) {
+      computedStock = processedVariants.reduce((sum, v) => {
+        if (Array.isArray(v.sizes) && v.sizes.length > 0) {
+          const vStock = v.sizes.reduce(
+            (sSum, s) => sSum + Number(s.stock || 0),
+            0,
+          );
+          return sum + vStock;
+        }
+        return sum + Number(v.stock || 0);
+      }, 0);
+    }
+
     const updatedDoc = {
       productName: productName ?? existingProduct.productName,
-      slug: slug ?? existingProduct.slug,
-      stock: stock !== undefined ? Number(stock) : existingProduct.stock,
+      slug: cleanSlug,
+      stock: computedStock,
       category: category ?? existingProduct.category,
       productDescription:
         productDescription ?? existingProduct.productDescription,
@@ -215,6 +341,7 @@ export const updateProduct = async (req, res) => {
         featured !== undefined
           ? Boolean(featured)
           : existingProduct.featured || false,
+      hasVariants: hasVariantsBool,
       variantDetails: processedVariants,
       updatedAt: new Date(),
     };
@@ -234,7 +361,7 @@ export const updateProduct = async (req, res) => {
     });
   } catch (error) {
     console.error("Error updating product:", error);
-    res.status(500).json({ message: "Failed to update product" });
+    res.status(500).json({ success: false, message: error.message || "Failed to update product" });
   }
 };
 
@@ -500,9 +627,57 @@ export const quickUpdateProductStock = async (req, res) => {
         return v;
       });
 
+      const totalStock = updatedVariants.reduce((sum, v) => {
+        if (Array.isArray(v.sizes) && v.sizes.length > 0) {
+          return (
+            sum +
+            v.sizes.reduce((sSum, s) => sSum + Number(s.stock || 0), 0)
+          );
+        }
+        return sum + Number(v.stock || 0);
+      }, 0);
+
       await productCollection.updateOne(
         { _id: new ObjectId(id) },
-        { $set: { variantDetails: updatedVariants, updatedAt: new Date() } },
+        {
+          $set: {
+            variantDetails: updatedVariants,
+            stock: totalStock,
+            updatedAt: new Date(),
+          },
+        },
+      );
+    } else if (color && Array.isArray(product.variantDetails)) {
+      // Specific color (without size / color-only variant)
+      const updatedVariants = product.variantDetails.map((v) => {
+        if (v.color === color) {
+          return {
+            ...v,
+            stock: Number(stock),
+          };
+        }
+        return v;
+      });
+
+      const totalStock = updatedVariants.reduce((sum, v) => {
+        if (Array.isArray(v.sizes) && v.sizes.length > 0) {
+          return (
+            sum +
+            v.sizes.reduce((sSum, s) => sSum + Number(s.stock || 0), 0)
+          );
+        }
+        return sum + Number(v.stock || 0);
+      }, 0);
+
+      await productCollection.updateOne(
+        { _id: new ObjectId(id) },
+        {
+          $set: {
+            variantDetails: updatedVariants,
+            stock: totalStock,
+            updatedAt: new Date(),
+          },
+        },
       );
     } else {
       // General product stock update

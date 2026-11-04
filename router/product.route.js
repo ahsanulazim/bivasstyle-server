@@ -12,11 +12,20 @@ import {
   searchProducts,
   toggleProductFeatured,
   updateProduct,
+  uploadProductImages,
 } from "../controller/product.controller.js";
 import { verifyAdmin, verifyToken } from "../middleware/auth.middleware.js";
+import { uploadImagesMiddleware } from "../middleware/upload.middleware.js";
 
 const router = express.Router();
 
+router.post(
+  "/uploadImages",
+  verifyToken,
+  verifyAdmin,
+  uploadImagesMiddleware.array("images", 10),
+  uploadProductImages,
+);
 router.post("/createProduct", verifyToken, verifyAdmin, createProduct);
 router.put("/updateProduct", verifyToken, verifyAdmin, updateProduct);
 router.patch("/toggleFeatured", verifyToken, verifyAdmin, toggleProductFeatured);

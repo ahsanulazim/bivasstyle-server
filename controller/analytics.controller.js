@@ -1,4 +1,5 @@
 import { ObjectId } from "mongodb";
+import { sendFacebookCapiEvent } from "../services/facebookCapi.js";
 import {
   orderCollection,
   productCollection,
@@ -581,5 +582,52 @@ export const exportAnalyticsReport = async (req, res) => {
       message: "Failed to generate report export",
       error: error.message,
     });
+  }
+};
+
+/**
+ * Handle incoming client Facebook CAPI event requests (ViewContent, AddToCart, InitiateCheckout, etc.)
+ */
+export const trackFacebookCapiEvent = async (req, res) => {
+  try {
+    const {
+      eventName,
+      eventId,
+      eventSourceUrl,
+      customData,
+      customer,
+      user,
+      fbp,
+      fbc,
+    } = req.body || {};
+
+    if (!eventName) {
+      return res
+        .status(400)
+        .json({ success: false, message: "eventName is required" });
+    }
+
+    const result = await sendFacebookCapiEvent({
+      eventName,
+      eventId,
+      eventSourceUrl,
+      customData,
+      customer,
+      user,
+      req,
+      fbp,
+      fbc,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Event processed",
+      result,
+    });
+  } catch (error) {
+    console.error("Facebook CAPI endpoint error:", error);
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
   }
 };

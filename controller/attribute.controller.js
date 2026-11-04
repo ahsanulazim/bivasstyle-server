@@ -3,7 +3,7 @@ import { attributeCollection } from "../db/db.collection.js";
 import { emitRealtimeEvent } from "../lib/socket.js";
 
 export const createAttribute = async (req, res) => {
-  const { name, slug, variations } = req.body;
+  const { name, slug, variations, type } = req.body;
 
   if (!name || !slug || !variations) {
     return res
@@ -17,6 +17,7 @@ export const createAttribute = async (req, res) => {
   const attribute = {
     name,
     slug,
+    type: type || (slug === "color" ? "color" : "button"),
     variations,
     createdAt,
     updatedAt,
@@ -38,7 +39,7 @@ export const createAttribute = async (req, res) => {
 
 export const updateAttribute = async (req, res) => {
   const { id } = req.query;
-  const { name, slug, variations } = req.body;
+  const { name, slug, variations, type } = req.body;
 
   if (!name || !slug || !variations) {
     return res
@@ -51,6 +52,7 @@ export const updateAttribute = async (req, res) => {
   const attribute = {
     name,
     slug,
+    ...(type && { type }),
     variations,
     updatedAt,
   };
