@@ -10,6 +10,7 @@ import {
   orderCollection,
   productCollection,
   shippingRateCollection,
+  shippingSettingsCollection,
   userCollection,
 } from "../db/db.collection.js";
 dotenv.config();
@@ -24,11 +25,16 @@ export const deductOrderStock = async (products) => {
 
     if (
       Array.isArray(productData.variantDetails) &&
-      productData.variantDetails.length > 0 &&
-      product.color
+      productData.variantDetails.length > 0
     ) {
+      let variantMatched = false;
       const variantData = productData.variantDetails.map((variant) => {
-        if (variant.color?.toLowerCase() === product.color?.toLowerCase()) {
+        // Case 1: Variant matched by Color
+        if (
+          product.color &&
+          variant.color?.toLowerCase() === product.color?.toLowerCase()
+        ) {
+          variantMatched = true;
           if (
             product.size &&
             Array.isArray(variant.sizes) &&
@@ -37,7 +43,7 @@ export const deductOrderStock = async (products) => {
             return {
               ...variant,
               sizes: variant.sizes.map((size) =>
-                size.size === product.size
+                size.size?.toLowerCase() === product.size?.toLowerCase()
                   ? {
                       ...size,
                       stock: Math.max(
@@ -59,6 +65,40 @@ export const deductOrderStock = async (products) => {
             };
           }
         }
+
+        // Case 2: Variant matched by Size directly (Size-only variant, without color)
+        if (
+          !product.color &&
+          product.size &&
+          (variant.size?.toLowerCase() === product.size?.toLowerCase() ||
+            variant.name?.toLowerCase() === product.size?.toLowerCase())
+        ) {
+          variantMatched = true;
+          return {
+            ...variant,
+            stock: Math.max(
+              0,
+              Number(variant.stock || 0) - product.quantity,
+            ),
+          };
+        }
+
+        // Case 3: Variant matched by Custom Attribute (e.g. Material)
+        if (
+          product.attributeValue &&
+          ((variant.attributeValue && variant.attributeValue?.toLowerCase() === product.attributeValue?.toLowerCase()) ||
+            (variant.name && variant.name?.toLowerCase() === product.attributeValue?.toLowerCase()))
+        ) {
+          variantMatched = true;
+          return {
+            ...variant,
+            stock: Math.max(
+              0,
+              Number(variant.stock || 0) - product.quantity,
+            ),
+          };
+        }
+
         return variant;
       });
 

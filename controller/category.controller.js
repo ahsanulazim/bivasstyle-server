@@ -4,7 +4,7 @@ import cloudinary from "../lib/cloudinary.js";
 import { emitRealtimeEvent } from "../lib/socket.js";
 
 export const createCategory = async (req, res) => {
-  const { name, slug, thumbnail } = req.body;
+  const { name, slug, thumbnail, isFeatured } = req.body;
   const createdAt = new Date();
   const updatedAt = new Date();
 
@@ -27,13 +27,14 @@ export const createCategory = async (req, res) => {
     name,
     slug,
     coverThumbnail,
+    isFeatured: Boolean(isFeatured),
     createdAt,
     updatedAt,
   };
 
   try {
     await categoryCollection.insertOne(category);
-    emitRealtimeEvent("category:updated", { action: "created", slug });
+    emitRealtimeEvent("category:updated", { action: "created", slug, isFeatured: category.isFeatured });
     emitRealtimeEvent("dashboard:update", { type: "category", action: "created" });
     res.status(201).json({ success: true, message: "Category is created" });
   } catch (error) {
@@ -45,7 +46,7 @@ export const createCategory = async (req, res) => {
 
 export const updateCategory = async (req, res) => {
   const { id } = req.query;
-  const { name, slug, thumbnail } = req.body;
+  const { name, slug, thumbnail, isFeatured } = req.body;
 
   if (!id || !ObjectId.isValid(id)) {
     return res.status(400).json({ success: false, message: "Valid category ID is required" });
@@ -61,10 +62,14 @@ export const updateCategory = async (req, res) => {
     }
 
     const updateDoc = {
-      name: name || category.name,
-      slug: slug || category.slug,
+      name: name !== undefined ? name : category.name,
+      slug: slug !== undefined ? slug : category.slug,
       updatedAt: new Date(),
     };
+
+    if (isFeatured !== undefined) {
+      updateDoc.isFeatured = Boolean(isFeatured);
+    }
 
     if (thumbnail && thumbnail !== category.coverThumbnail) {
       if (typeof thumbnail === "string" && thumbnail.startsWith("data:image")) {
@@ -79,6 +84,8 @@ export const updateCategory = async (req, res) => {
       } else {
         updateDoc.coverThumbnail = thumbnail;
       }
+    } else if (thumbnail === null || thumbnail === "") {
+      updateDoc.coverThumbnail = "";
     }
 
     await categoryCollection.updateOne(
@@ -86,13 +93,68 @@ export const updateCategory = async (req, res) => {
       { $set: updateDoc }
     );
 
-    emitRealtimeEvent("category:updated", { action: "updated", slug: updateDoc.slug, categoryId: id });
+    emitRealtimeEvent("category:updated", {
+      action: "updated",
+      slug: updateDoc.slug,
+      categoryId: id,
+      isFeatured: updateDoc.isFeatured !== undefined ? updateDoc.isFeatured : category.isFeatured,
+    });
     emitRealtimeEvent("dashboard:update", { type: "category", action: "updated" });
 
     res.status(200).json({ success: true, message: "Category updated successfully" });
   } catch (error) {
     console.error("Error updating category:", error);
     res.status(500).json({ success: false, message: "Failed to update category" });
+  }
+};
+
+export const toggleCategoryFeatured = async (req, res) => {
+  const id = req.query.id || req.body.id;
+  const { isFeatured } = req.body;
+
+  if (!id || !ObjectId.isValid(id)) {
+    return res.status(400).json({ success: false, message: "Valid category ID is required" });
+  }
+
+  try {
+    const category = await categoryCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!category) {
+      return res.status(404).json({ success: false, message: "Category not found" });
+    }
+
+    const nextFeatured = isFeatured !== undefined ? Boolean(isFeatured) : !category.isFeatured;
+
+    await categoryCollection.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: {
+          isFeatured: nextFeatured,
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    emitRealtimeEvent("category:updated", {
+      action: "featured_toggled",
+      categoryId: id,
+      isFeatured: nextFeatured,
+    });
+    emitRealtimeEvent("dashboard:update", {
+      type: "category",
+      action: "featured_toggled",
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `Category ${nextFeatured ? "marked as featured" : "unmarked as featured"}`,
+      isFeatured: nextFeatured,
+    });
+  } catch (error) {
+    console.error("Error toggling category featured status:", error);
+    res.status(500).json({ success: false, message: "Failed to toggle featured status" });
   }
 };
 

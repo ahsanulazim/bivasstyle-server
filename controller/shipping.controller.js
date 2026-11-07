@@ -1,7 +1,88 @@
 import { ObjectId } from "mongodb";
 import cloudinary from "../lib/cloudinary.js";
-import { shippingRateCollection } from "../db/db.collection.js";
+import {
+  shippingRateCollection,
+  shippingSettingsCollection,
+} from "../db/db.collection.js";
 import { emitRealtimeEvent } from "../lib/socket.js";
+
+export const getShippingSettings = async (req, res) => {
+  try {
+    const settings = await shippingSettingsCollection.findOne({
+      _id: "shipping_settings",
+    });
+
+    res.status(200).json(
+      settings || {
+        _id: "shipping_settings",
+        isGlobalFlatRateEnabled: false,
+        globalFlatRateAmount: 0,
+        globalFlatRateTitle: "Standard Delivery",
+      },
+    );
+  } catch (error) {
+    console.error("Error fetching shipping settings:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+};
+
+export const updateShippingSettings = async (req, res) => {
+  try {
+    const {
+      isGlobalFlatRateEnabled,
+      globalFlatRateAmount,
+      globalFlatRateTitle,
+    } = req.body;
+
+    const parsedAmount = Number(globalFlatRateAmount);
+    const parsedEnabled =
+      typeof isGlobalFlatRateEnabled === "boolean"
+        ? isGlobalFlatRateEnabled
+        : isGlobalFlatRateEnabled === "true";
+
+    if (parsedEnabled && (isNaN(parsedAmount) || parsedAmount < 0)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Valid non-negative flat rate amount is required when enabling flat rate",
+      });
+    }
+
+    const updatedData = {
+      _id: "shipping_settings",
+      isGlobalFlatRateEnabled: parsedEnabled,
+      globalFlatRateAmount:
+        isNaN(parsedAmount) || parsedAmount < 0 ? 0 : parsedAmount,
+      globalFlatRateTitle: (globalFlatRateTitle || "Standard Delivery").trim(),
+      updatedAt: new Date(),
+    };
+
+    await shippingSettingsCollection.updateOne(
+      { _id: "shipping_settings" },
+      { $set: updatedData },
+      { upsert: true },
+    );
+
+    emitRealtimeEvent("shipping:updated", {
+      action: "settings_updated",
+    });
+    emitRealtimeEvent("dashboard:update", {
+      type: "shipping",
+      action: "settings_updated",
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Shipping settings updated successfully",
+      settings: updatedData,
+    });
+  } catch (error) {
+    console.error("Error updating shipping settings:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "Failed to update shipping settings" });
+  }
+};
 
 export const createShippingRate = async (req, res) => {
   let {
@@ -12,29 +93,44 @@ export const createShippingRate = async (req, res) => {
     location,
     status,
     weightLimit,
+    isFlatRate,
+    rateType,
   } = req.body;
 
+  const parsedIsFlatRate =
+    isFlatRate === true ||
+    isFlatRate === "true" ||
+    rateType === "flat";
   const parsedBaseCharge = Number(baseCharge);
   const parsedExtraCharge =
+    parsedIsFlatRate ||
     extraCharge === undefined ||
     extraCharge === "" ||
     isNaN(Number(extraCharge))
       ? 0
       : Number(extraCharge);
-  const parsedWeightLimit = Number(weightLimit);
+  const parsedWeightLimit = parsedIsFlatRate ? 0 : Number(weightLimit);
   const parsedStatus = typeof status === "boolean" ? status : status === "true";
 
   if (
     !companyName ||
     !location ||
     isNaN(parsedBaseCharge) ||
-    parsedBaseCharge <= 0 ||
-    isNaN(parsedWeightLimit) ||
-    parsedWeightLimit <= 0
+    parsedBaseCharge <= 0
   ) {
     return res.status(400).json({
       message:
-        "Company name, company logo, location, valid base charge (> 0), and weight limit (> 0) are required",
+        "Company name, location, and valid base charge (> 0) are required",
+    });
+  }
+
+  if (
+    !parsedIsFlatRate &&
+    (isNaN(parsedWeightLimit) || parsedWeightLimit <= 0)
+  ) {
+    return res.status(400).json({
+      message:
+        "Valid weight limit (> 0) is required for weight-based shipping rates",
     });
   }
 
@@ -72,6 +168,8 @@ export const createShippingRate = async (req, res) => {
     companyLogo: companyLogoUrl,
     companyName: companyName.trim(),
     extraCharge: parsedExtraCharge,
+    isFlatRate: parsedIsFlatRate,
+    rateType: parsedIsFlatRate ? "flat" : "weight_based",
     location,
     status: parsedStatus,
     weightLimit: parsedWeightLimit,
@@ -119,29 +217,44 @@ export const updateShippingRate = async (req, res) => {
     location,
     status,
     weightLimit,
+    isFlatRate,
+    rateType,
   } = req.body;
 
+  const parsedIsFlatRate =
+    isFlatRate === true ||
+    isFlatRate === "true" ||
+    rateType === "flat";
   const parsedBaseCharge = Number(baseCharge);
   const parsedExtraCharge =
+    parsedIsFlatRate ||
     extraCharge === undefined ||
     extraCharge === "" ||
     isNaN(Number(extraCharge))
       ? 0
       : Number(extraCharge);
-  const parsedWeightLimit = Number(weightLimit);
+  const parsedWeightLimit = parsedIsFlatRate ? 0 : Number(weightLimit);
   const parsedStatus = typeof status === "boolean" ? status : status === "true";
 
   if (
     !companyName ||
     !location ||
     isNaN(parsedBaseCharge) ||
-    parsedBaseCharge <= 0 ||
-    isNaN(parsedWeightLimit) ||
-    parsedWeightLimit <= 0
+    parsedBaseCharge <= 0
   ) {
     return res.status(400).json({
       message:
-        "Company name, location, valid base charge (> 0), and weight limit (> 0) are required",
+        "Company name, location, and valid base charge (> 0) are required",
+    });
+  }
+
+  if (
+    !parsedIsFlatRate &&
+    (isNaN(parsedWeightLimit) || parsedWeightLimit <= 0)
+  ) {
+    return res.status(400).json({
+      message:
+        "Valid weight limit (> 0) is required for weight-based shipping rates",
     });
   }
 
@@ -202,6 +315,8 @@ export const updateShippingRate = async (req, res) => {
       companyLogo: companyLogoUrl,
       companyName: companyName.trim(),
       extraCharge: parsedExtraCharge,
+      isFlatRate: parsedIsFlatRate,
+      rateType: parsedIsFlatRate ? "flat" : "weight_based",
       location,
       status: parsedStatus,
       weightLimit: parsedWeightLimit,
@@ -251,13 +366,32 @@ export const getAllShippingRates = async (req, res) => {
 export const getShippingRateByDistrict = async (req, res) => {
   const { district } = req.query;
 
-  if (!district) {
-    return res
-      .status(400)
-      .json({ success: false, message: "District is required" });
-  }
-
   try {
+    // 1. Check if global flat rate is active
+    const settings = await shippingSettingsCollection.findOne({
+      _id: "shipping_settings",
+    });
+
+    if (settings && settings.isGlobalFlatRateEnabled) {
+      return res.status(200).json({
+        _id: "global_flat_rate",
+        companyName: settings.globalFlatRateTitle || "Standard Delivery",
+        baseCharge: Number(settings.globalFlatRateAmount || 0),
+        extraCharge: 0,
+        weightLimit: 0,
+        isFlatRate: true,
+        rateType: "flat",
+        status: true,
+        location: [{ value: "all", label: "All Areas (Global Flat Rate)" }],
+      });
+    }
+
+    if (!district) {
+      return res
+        .status(400)
+        .json({ success: false, message: "District is required" });
+    }
+
     const districtQuery = [district];
     if (!isNaN(district)) {
       districtQuery.push(Number(district));

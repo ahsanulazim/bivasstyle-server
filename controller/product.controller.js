@@ -399,44 +399,76 @@ export const getProductsByFilters = async (req, res) => {
   const skip = (page - 1) * limit;
 
   try {
-    const filter = {};
+    const andConditions = [];
 
     // Only filter by category if category is provided and not "all"
     if (category && category !== "all" && category !== "undefined") {
-      filter.category = category;
+      andConditions.push({
+        $or: [
+          { category: category },
+          { category: category.replace(/-/g, " ") },
+          { category: { $regex: new RegExp(`^${category.replace(/-/g, "[ -]?")}$`, "i") } },
+        ],
+      });
     }
 
     // Search query support
     if (search && search.trim()) {
       const searchRegex = { $regex: search.trim(), $options: "i" };
-      filter.$or = [
-        { productName: searchRegex },
-        { category: searchRegex },
-        { sku: searchRegex },
-      ];
+      andConditions.push({
+        $or: [
+          { productName: searchRegex },
+          { category: searchRegex },
+          { sku: searchRegex },
+        ],
+      });
     }
 
     if (minPrice || maxPrice) {
-      filter["variantDetails.sizes.price"] = {};
-      if (minPrice)
-        filter["variantDetails.sizes.price"].$gte = Number(minPrice);
-      if (maxPrice)
-        filter["variantDetails.sizes.price"].$lte = Number(maxPrice);
+      const priceCond = {};
+      if (minPrice) priceCond.$gte = Number(minPrice);
+      if (maxPrice) priceCond.$lte = Number(maxPrice);
+
+      andConditions.push({
+        $or: [
+          { "variantDetails.sizes.price": priceCond },
+          { price: priceCond },
+        ],
+      });
     }
 
     if (sizes) {
-      filter["variantDetails.sizes.size"] = { $in: sizes.split(",") };
+      andConditions.push({
+        $or: [
+          { "variantDetails.sizes.size": { $in: sizes.split(",") } },
+          { "variantDetails.size": { $in: sizes.split(",") } },
+        ],
+      });
     }
 
     if (colors) {
-      filter["variantDetails.color"] = { $in: colors.split(",") };
+      andConditions.push({
+        "variantDetails.color": { $in: colors.split(",") },
+      });
     }
 
     if (stock === "in") {
-      filter["variantDetails.sizes.stock"] = { $gt: 0 };
+      andConditions.push({
+        $or: [
+          { "variantDetails.sizes.stock": { $gt: 0 } },
+          { stock: { $gt: 0 } },
+        ],
+      });
     } else if (stock === "out") {
-      filter["variantDetails.sizes.stock"] = { $eq: 0 };
+      andConditions.push({
+        $or: [
+          { "variantDetails.sizes.stock": { $eq: 0 } },
+          { stock: { $lte: 0 } },
+        ],
+      });
     }
+
+    const filter = andConditions.length > 0 ? { $and: andConditions } : {};
 
     // Sorting
     let sortOption = { createdAt: -1 };
@@ -597,7 +629,7 @@ export const toggleProductFeatured = async (req, res) => {
 
 export const quickUpdateProductStock = async (req, res) => {
   const { id } = req.query;
-  const { stock, color, size } = req.body;
+  const { stock, color, size, attributeValue } = req.body;
 
   if (!id || !ObjectId.isValid(id)) {
     return res.status(400).json({ success: false, message: "Valid product ID is required" });
@@ -651,6 +683,70 @@ export const quickUpdateProductStock = async (req, res) => {
       // Specific color (without size / color-only variant)
       const updatedVariants = product.variantDetails.map((v) => {
         if (v.color === color) {
+          return {
+            ...v,
+            stock: Number(stock),
+          };
+        }
+        return v;
+      });
+
+      const totalStock = updatedVariants.reduce((sum, v) => {
+        if (Array.isArray(v.sizes) && v.sizes.length > 0) {
+          return (
+            sum +
+            v.sizes.reduce((sSum, s) => sSum + Number(s.stock || 0), 0)
+          );
+        }
+        return sum + Number(v.stock || 0);
+      }, 0);
+
+      await productCollection.updateOne(
+        { _id: new ObjectId(id) },
+        {
+          $set: {
+            variantDetails: updatedVariants,
+            stock: totalStock,
+            updatedAt: new Date(),
+          },
+        },
+      );
+    } else if (size && Array.isArray(product.variantDetails)) {
+      // Size without color (Size-only variant)
+      const updatedVariants = product.variantDetails.map((v) => {
+        if (v.size === size || v.name === size) {
+          return {
+            ...v,
+            stock: Number(stock),
+          };
+        }
+        return v;
+      });
+
+      const totalStock = updatedVariants.reduce((sum, v) => {
+        if (Array.isArray(v.sizes) && v.sizes.length > 0) {
+          return (
+            sum +
+            v.sizes.reduce((sSum, s) => sSum + Number(s.stock || 0), 0)
+          );
+        }
+        return sum + Number(v.stock || 0);
+      }, 0);
+
+      await productCollection.updateOne(
+        { _id: new ObjectId(id) },
+        {
+          $set: {
+            variantDetails: updatedVariants,
+            stock: totalStock,
+            updatedAt: new Date(),
+          },
+        },
+      );
+    } else if (attributeValue && Array.isArray(product.variantDetails)) {
+      // Custom attribute variant (e.g. Material)
+      const updatedVariants = product.variantDetails.map((v) => {
+        if (v.attributeValue === attributeValue || v.name === attributeValue) {
           return {
             ...v,
             stock: Number(stock),
@@ -747,53 +843,83 @@ export const bulkUpdateProducts = async (req, res) => {
 export const getCategoryFilters = async (req, res) => {
   const { category } = req.query;
   try {
-    const pipeline = [];
-
+    const match = {};
     if (category && category !== "all" && category !== "undefined") {
-      pipeline.push({ $match: { category } });
+      match.$or = [
+        { category: category },
+        { category: category.replace(/-/g, " ") },
+        { category: { $regex: new RegExp(`^${category.replace(/-/g, "[ -]?")}$`, "i") } },
+      ];
     }
 
-    pipeline.push(
-      // Flatten variantDetails
-      { $unwind: "$variantDetails" },
+    const products = await productCollection
+      .find(match)
+      .project({
+        price: 1,
+        variantDetails: 1,
+      })
+      .toArray();
 
-      // Flatten sizes array inside variantDetails
-      { $unwind: "$variantDetails.sizes" },
+    let maxPrice = 0;
+    const colorsMap = new Map();
+    const sizesSet = new Set();
+    const stockStatus = [];
 
-      {
-        $group: {
-          _id: null,
-          minPrice: { $min: { $toInt: "$variantDetails.sizes.price" } },
-          maxPrice: { $max: { $toInt: "$variantDetails.sizes.price" } },
-          colors: {
-            $addToSet: {
-              color: "$variantDetails.color",
-              hex: "$variantDetails.hex",
-              swatchImage: "$variantDetails.swatchImage",
-            },
-          },
-          sizes: { $addToSet: "$variantDetails.sizes.size" },
-          stockStatus: {
-            $addToSet: {
-              size: "$variantDetails.sizes.size",
-              stock: "$variantDetails.sizes.stock",
-            },
-          },
-        },
-      },
-    );
+    for (const prod of products) {
+      if (prod.price !== undefined && prod.price !== null && !isNaN(Number(prod.price))) {
+        maxPrice = Math.max(maxPrice, Number(prod.price));
+      }
 
-    const filter = await productCollection.aggregate(pipeline).toArray();
-    res.json(
-      filter[0] || {
-        minPrice: 0,
-        maxPrice: 10000,
-        colors: [],
-        sizes: [],
-        stockStatus: [],
-      },
-    );
+      if (Array.isArray(prod.variantDetails)) {
+        for (const variant of prod.variantDetails) {
+          if (variant.price !== undefined && variant.price !== null && !isNaN(Number(variant.price))) {
+            maxPrice = Math.max(maxPrice, Number(variant.price));
+          }
+          if (variant.color) {
+            colorsMap.set(variant.color, {
+              color: variant.color,
+              hex: variant.hex,
+              swatchImage: variant.swatchImage,
+            });
+          }
+          if (variant.size) {
+            sizesSet.add(variant.size);
+            if (variant.stock !== undefined) {
+              stockStatus.push({
+                size: variant.size,
+                stock: variant.stock,
+              });
+            }
+          }
+          if (Array.isArray(variant.sizes)) {
+            for (const sizeObj of variant.sizes) {
+              if (sizeObj.price !== undefined && sizeObj.price !== null && !isNaN(Number(sizeObj.price))) {
+                maxPrice = Math.max(maxPrice, Number(sizeObj.price));
+              }
+              if (sizeObj.size) {
+                sizesSet.add(sizeObj.size);
+              }
+              if (sizeObj.size && sizeObj.stock !== undefined) {
+                stockStatus.push({
+                  size: sizeObj.size,
+                  stock: sizeObj.stock,
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    res.json({
+      minPrice: 0,
+      maxPrice: maxPrice > 0 ? Math.ceil(maxPrice) : 10000,
+      colors: Array.from(colorsMap.values()),
+      sizes: Array.from(sizesSet),
+      stockStatus,
+    });
   } catch (error) {
+    console.error("Filters error:", error);
     res.status(500).json({ message: "Filters error" });
   }
 };

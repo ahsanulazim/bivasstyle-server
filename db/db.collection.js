@@ -13,6 +13,7 @@ export const reviewCollection = db.collection("reviews");
 export const attributeCollection = db.collection("attributes");
 export const variationCollection = db.collection("variations");
 export const shippingRateCollection = db.collection("shipping_rates");
+export const shippingSettingsCollection = db.collection("shipping_settings");
 
 export const initIndexes = async () => {
   try {
